@@ -2,7 +2,8 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple, Union
+from six.moves import cPickle as pickle
 
 
 class MultilayerPerceptron(object):
@@ -33,11 +34,23 @@ class LogisticRegression(object):
         return tf.compat.v1.matmul(x, self.weights['lm']) + self.biases['out']
 
 
-def reformat(dataset, labels, n_labels=10):
-    dataset = dataset.reshape((-1, dataset.shape[1] * dataset.shape[-1])).astype(np.float32)
-    labels = (np.arange(n_labels) == labels[:, None]).astype(np.float32)
+def load_data_splits(in_dir):
+    with open(in_dir, 'rb') as f:
+        data = pickle.load(f)
+        X_train, y_train = reformat(data['train_dataset'], data['train_labels'])
+        X_valid, y_valid = reformat(data['valid_dataset'], data['valid_labels'])
+        X_test, y_test = reformat(data['test_dataset'], data['test_labels'])
+        del data
 
-    return dataset, labels
+    return X_train, X_valid, X_test, y_train, y_valid, y_test
+
+
+def reformat(X, y, new_shape: Union[Tuple, int] = 784, n_labels: int =10, dtype: np.dtype = np.float32):
+    newshape = (-1, new_shape) if isinstance(new_shape, int) else (-1,) + new_shape
+    X = X.reshape(newshape).astype(dtype)
+    y = (np.arange(n_labels) == y[:, None]).astype(dtype)
+
+    return X, y
 
 
 def accuracy(y_pred, y_true):
