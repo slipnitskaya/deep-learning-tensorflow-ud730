@@ -34,18 +34,37 @@ class LogisticRegression(object):
         return tf.compat.v1.matmul(x, self.weights['lm']) + self.biases['out']
 
 
-def load_data_splits(in_dir):
+class CNN2D(object):
+
+    def __init__(self, weights: Dict, biases: Dict):
+        super().__init__()
+        self.weights = weights
+        self.biases = biases
+
+    def __call__(self, x):
+        conv = tf.nn.conv2d(x, self.weights['l1'], [1, 2, 2, 1], padding='SAME')
+        hidden = tf.nn.relu(conv + self.biases['b1'])
+        conv = tf.nn.conv2d(hidden, self.weights['l2'], [1, 2, 2, 1], padding='SAME')
+        hidden = tf.nn.relu(conv + self.biases['b2'])
+        shape = hidden.get_shape().as_list()
+        reshape = tf.reshape(hidden, [shape[0], shape[1] * shape[2] * shape[3]])
+        hidden = tf.nn.relu(tf.matmul(reshape, self.weights['l3']) + self.biases['b3'])
+
+        return tf.compat.v1.matmul(hidden, self.weights['l4']) + self.biases['b4']
+
+
+def load_data_splits(in_dir, new_shape: Union[Tuple, int] = 784, n_labels: int = 10):
     with open(in_dir, 'rb') as f:
         data = pickle.load(f)
-        X_train, y_train = reformat(data['train_dataset'], data['train_labels'])
-        X_valid, y_valid = reformat(data['valid_dataset'], data['valid_labels'])
-        X_test, y_test = reformat(data['test_dataset'], data['test_labels'])
+        X_train, y_train = reformat(data['train_dataset'], data['train_labels'], new_shape, n_labels)
+        X_valid, y_valid = reformat(data['valid_dataset'], data['valid_labels'], new_shape, n_labels)
+        X_test, y_test = reformat(data['test_dataset'], data['test_labels'], new_shape, n_labels)
         del data
 
     return X_train, X_valid, X_test, y_train, y_valid, y_test
 
 
-def reformat(X, y, new_shape: Union[Tuple, int] = 784, n_labels: int =10, dtype: np.dtype = np.float32):
+def reformat(X, y, new_shape: Union[Tuple, int] = 784, n_labels: int = 10, dtype: np.dtype = np.float32):
     newshape = (-1, new_shape) if isinstance(new_shape, int) else (-1,) + new_shape
     X = X.reshape(newshape).astype(dtype)
     y = (np.arange(n_labels) == y[:, None]).astype(dtype)
@@ -68,18 +87,24 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
     n_input = train_dataset.shape[1]
     n_classes = train_labels.shape[-1]
 
-    c = get_param(params, 'c', 1e-2)
-    lr = get_param(params, 'lr', 1e-1)
-
     num_steps = get_param(params, 'num_steps', 1001)
     batch_size = get_param(params, 'batch_size', 128)
 
+    c = get_param(params, 'c', 1e-2)
+    lr = get_param(params, 'lr', 1e-1)
     lr_decay = get_param(params, 'lr_decay', 0.0)
     decay_steps = get_param(params, 'decay_steps', 1e3)
+    l2_regularizaion = get_param(params, 'l2_regularizaion', True)
 
     graph = tf.Graph()
     with graph.as_default():
-        tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_input))
+
+        if est_class is CNN2D:
+            height, width, num_channels = train_dataset.shape[1:]
+            tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, height, width, num_channels))
+        else:
+            tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_input))
+
         tf_train_labels = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_classes))
         tf_test_dataset = tf.constant(test_dataset)
 
@@ -99,25 +124,49 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
 
             est = est_class(weights, biases, dropout_rate, random_seed)
 
-            l2_regularization = np.sum(
-                [c * tf.nn.l2_loss(weights['h1']), c * tf.nn.l2_loss(biases['b1']),
-                 c * tf.nn.l2_loss(weights['out']), c * tf.nn.l2_loss(biases['out'])])
+        else:
+            if est_class is LogisticRegression:
+                weights = {'lm': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_classes]))}
 
-        elif est_class is LogisticRegression:
+            elif est_class is CNN2D:
 
-            weights = {'lm': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_classes]))}
+                depth = get_param(params, 'depth', 16)
+                n_hidden = get_param(params, 'n_hidden', 1024)
+                patch_size = get_param(params, 'patch_size', 5)
+                stddev = 0.1
+
+                weights = {
+                    'l1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, num_channels, depth], stddev)),
+                    'l2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth, depth], stddev)),
+                    'l3': tf.Variable(tf.compat.v1.truncated_normal([height // 4 * width // 4 * depth, n_hidden], stddev)),
+                    'l4': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes], stddev))
+                }
+                biases = {
+                    'b1': tf.Variable(tf.zeros([depth])),
+                    'b2': tf.Variable(tf.constant(1.0, shape=[depth])),
+                    'b3': tf.Variable(tf.constant(1.0, shape=[n_hidden])),
+                    'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
+                }
 
             est = est_class(weights, biases)
 
-            l2_regularization = np.sum([c * tf.nn.l2_loss(weights['lm']), c * tf.nn.l2_loss(biases['out'])])
-
         # train the model
         logits = est(tf_train_dataset)
-        loss = tf.reduce_mean(
-            tf.nn.softmax_cross_entropy_with_logits(labels=tf_train_labels, logits=logits) + l2_regularization)
+        model_name = est.__class__.__name__
+
+        if l2_regularizaion:
+            print('Applying L2 regularization...')
+            l2_regularized = np.sum(
+                [*[c * tf.nn.l2_loss(w) for w in weights.values()], *[c * tf.nn.l2_loss(b) for b in biases.values()]]
+            )
+            loss = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(labels=tf_train_labels, logits=logits) + l2_regularized
+            )
+        else:
+            loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=tf_train_labels, logits=logits))
 
         global_step = None
-        if lr_decay in params and lr_decay > 0.0:
+        if lr_decay > 0.0:
             print('Scheduling learning rate decay...')
             global_step = tf.Variable(0)
             lr = tf.compat.v1.train.exponential_decay(lr, global_step, decay_steps, lr_decay)
@@ -127,6 +176,7 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         # get predictions
         train_prediction = tf.nn.softmax(logits)
         test_prediction = tf.nn.softmax(est(tf_test_dataset))
+    del est
 
     # test the model
     loss_logs = list()
@@ -145,9 +195,7 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
 
         plt.figure(figsize=(5, 2))
         plt.plot(loss_logs)
-        plt.title(f'Cross-entropy loss. Model: {est.__class__.__name__}')
+        plt.title(f'Cross-entropy loss. Model: {model_name}')
         plt.xlabel('epoch')
         plt.ylabel('loss')
         plt.show()
-
-        del est
