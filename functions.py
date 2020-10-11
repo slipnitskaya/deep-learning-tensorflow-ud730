@@ -42,15 +42,39 @@ class CNN2D(object):
         self.biases = biases
 
     def __call__(self, x):
-        conv = tf.nn.conv2d(x, self.weights['l1'], [1, 2, 2, 1], padding='SAME')
-        hidden = tf.nn.relu(conv + self.biases['b1'])
-        conv = tf.nn.conv2d(hidden, self.weights['l2'], [1, 2, 2, 1], padding='SAME')
-        hidden = tf.nn.relu(conv + self.biases['b2'])
-        shape = hidden.get_shape().as_list()
-        reshape = tf.reshape(hidden, [shape[0], shape[1] * shape[2] * shape[3]])
-        hidden = tf.nn.relu(tf.matmul(reshape, self.weights['l3']) + self.biases['b3'])
+        conv = tf.nn.conv2d(x, self.weights['w1'], [1, 1, 1, 1], padding='SAME') + self.biases['b1']
+        hidden = tf.nn.relu(conv)
+        pool = tf.nn.max_pool(hidden, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
+        conv = tf.nn.conv2d(pool, self.weights['w2'], [1, 1, 1, 1], padding='SAME') + self.biases['b2']
+        hidden = tf.nn.relu(conv)
+        pool = tf.nn.max_pool(hidden, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
+        shape = pool.get_shape().as_list()
+        reshape = tf.reshape(pool, [shape[0], shape[1] * shape[2] * shape[3]])
+        hidden = tf.nn.relu(tf.matmul(reshape, self.weights['w3']) + self.biases['b3'])
 
-        return tf.compat.v1.matmul(hidden, self.weights['l4']) + self.biases['b4']
+        return tf.compat.v1.matmul(hidden, self.weights['w4']) + self.biases['b4']
+
+
+class LeNet5(object):
+
+    def __init__(self, weights: Dict, biases: Dict):
+        super().__init__()
+        self.weights = weights
+        self.biases = biases
+
+    def __call__(self, x):
+        l_1 = tf.nn.conv2d(x, self.weights['w1'], [1, 1, 1, 1], padding='SAME') + self.biases['b1']
+        l_1 = tf.nn.relu(l_1)
+        pool = tf.nn.max_pool(l_1, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
+        l_2 = tf.nn.conv2d(pool, self.weights['w2'], [1, 1, 1, 1], padding='SAME') + self.biases['b2']
+        l_2 = tf.nn.relu(l_2)
+        pool = tf.nn.max_pool(l_2, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
+        l_3 = tf.compat.v1.layers.flatten(pool)
+        l_3 = tf.compat.v1.matmul(l_3, self.weights['w3']) + self.biases['b3']
+        l_3 = tf.nn.relu(l_3)
+        l_4 = tf.compat.v1.matmul(l_3, self.weights['w4']) + self.biases['b4']
+        l_4 = tf.nn.relu(l_4)
+        return tf.compat.v1.matmul(l_4, self.weights['w5']) + self.biases['b5']
 
 
 def load_data_splits(in_dir, new_shape: Union[Tuple, int] = 784, n_labels: int = 10):
@@ -94,67 +118,88 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
     lr = get_param(params, 'lr', 1e-1)
     lr_decay = get_param(params, 'lr_decay', 0.0)
     decay_steps = get_param(params, 'decay_steps', 1e3)
-    l2_regularizaion = get_param(params, 'l2_regularizaion', True)
+    l2_regularization = get_param(params, 'l2_regularization', False)
 
     graph = tf.Graph()
     with graph.as_default():
 
-        if est_class is CNN2D:
+        if est_class in [CNN2D, LeNet5]:
             height, width, num_channels = train_dataset.shape[1:]
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, height, width, num_channels))
         else:
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_input))
 
-        tf_train_labels = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_classes))
+        if est_class is LeNet5:
+            tf_train_labels = tf.one_hot(tf.compat.v1.placeholder(tf.int32, shape=None), n_classes)
+        else:
+            tf_train_labels = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_classes))
+
         tf_test_dataset = tf.constant(test_dataset)
 
         # setup the model
         biases = {'out': tf.Variable(tf.zeros([n_classes]))}
 
-        if est_class is MultilayerPerceptron:
+        if est_class is LogisticRegression:
+            weights = {'lm': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_classes]))}
+            est = est_class(weights, biases)
 
+        else:
             n_hidden = get_param(params, 'n_hidden', 1024)
             random_seed = get_param(params, 'random_seed', 42)
             dropout_rate = get_param(params, 'dropout_rate', 0.2)
 
-            weights = {
-                'h1': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_hidden])),
-                'out': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes]))}
-            biases['b1'] = tf.Variable(tf.zeros([n_hidden]))
+            if est_class is MultilayerPerceptron:
 
-            est = est_class(weights, biases, dropout_rate, random_seed)
+                weights = {
+                    'h1': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_hidden])),
+                    'out': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes]))}
+                biases['b1'] = tf.Variable(tf.zeros([n_hidden]))
 
-        else:
-            if est_class is LogisticRegression:
-                weights = {'lm': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_classes]))}
+            elif est_class in [CNN2D, LeNet5]:
 
-            elif est_class is CNN2D:
-
-                depth = get_param(params, 'depth', 16)
-                n_hidden = get_param(params, 'n_hidden', 1024)
                 patch_size = get_param(params, 'patch_size', 5)
                 stddev = 0.1
 
-                weights = {
-                    'l1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, num_channels, depth], stddev)),
-                    'l2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth, depth], stddev)),
-                    'l3': tf.Variable(tf.compat.v1.truncated_normal([height // 4 * width // 4 * depth, n_hidden], stddev)),
-                    'l4': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes], stddev))
-                }
-                biases = {
-                    'b1': tf.Variable(tf.zeros([depth])),
-                    'b2': tf.Variable(tf.constant(1.0, shape=[depth])),
-                    'b3': tf.Variable(tf.constant(1.0, shape=[n_hidden])),
-                    'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
-                }
+                if est_class is CNN2D:
+                    depth = get_param(params, 'depth', 16)
+                    weights = {
+                        'w1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, num_channels, depth], stddev)),
+                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth, depth], stddev)),
+                        'w3': tf.Variable(tf.compat.v1.truncated_normal([height // 4 * width // 4 * depth, n_hidden], stddev)),
+                        'w4': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes], stddev))
+                    }
+                    biases = {
+                        'b1': tf.Variable(tf.zeros([depth])),
+                        'b2': tf.Variable(tf.constant(1.0, shape=[depth])),
+                        'b3': tf.Variable(tf.constant(1.0, shape=[n_hidden])),
+                        'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
+                    }
 
-            est = est_class(weights, biases)
+                    est = est_class(weights, biases, dropout_rate, random_seed)
 
-        # train the model
+                elif est_class is LeNet5:
+                    depth ={'l1': 6, 'l2': 16, 'l3': 120, 'l4': 84}
+                    weights = {
+                        'w1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, 1, depth['l1']], stddev)),
+                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, 6, depth['l2']], stddev)),
+                        'w3': tf.Variable(tf.compat.v1.truncated_normal((height // 4 * width // 4 * depth['l2'], depth['l3']), stddev)),
+                        'w4': tf.Variable(tf.compat.v1.truncated_normal((depth['l3'], depth['l4']), stddev)),
+                        'w5': tf.Variable(tf.compat.v1.truncated_normal((depth['l4'], n_classes), stddev)),
+                    }
+                    biases = {
+                        'b1': tf.Variable(tf.zeros([depth['l1']])),
+                        'b2': tf.Variable(tf.constant(1.0, shape=[depth['l2']])),
+                        'b3': tf.Variable(tf.constant(1.0, shape=[depth['l3']])),
+                        'b4': tf.Variable(tf.constant(1.0, shape=[depth['l4']])),
+                        'b5': tf.Variable(tf.constant(1.0, shape=[n_classes]))
+                    }
+
+                    est = est_class(weights, biases)
+
         logits = est(tf_train_dataset)
         model_name = est.__class__.__name__
 
-        if l2_regularizaion:
+        if l2_regularization:
             print('Applying L2 regularization...')
             l2_regularized = np.sum(
                 [*[c * tf.nn.l2_loss(w) for w in weights.values()], *[c * tf.nn.l2_loss(b) for b in biases.values()]]
@@ -178,7 +223,7 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         test_prediction = tf.nn.softmax(est(tf_test_dataset))
     del est
 
-    # test the model
+    # train and test the model
     loss_logs = list()
     with tf.compat.v1.Session(graph=graph) as session:
         tf.compat.v1.global_variables_initializer().run()
