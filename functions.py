@@ -2,8 +2,8 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from typing import Any, Dict, Tuple, Union
 from six.moves import cPickle as pickle
+from typing import Any, Dict, Tuple, Union, Callable
 
 
 class MultilayerPerceptron(object):
@@ -40,41 +40,51 @@ class CNN2D(object):
         super().__init__()
         self.weights = weights
         self.biases = biases
+        self.strides = [1, 1, 1, 1]
+        self.kernels = [1, 2, 2, 1]
 
     def __call__(self, x):
-        conv = tf.nn.conv2d(x, self.weights['w1'], [1, 1, 1, 1], padding='SAME') + self.biases['b1']
-        hidden = tf.nn.relu(conv)
-        pool = tf.nn.max_pool(hidden, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
-        conv = tf.nn.conv2d(pool, self.weights['w2'], [1, 1, 1, 1], padding='SAME') + self.biases['b2']
-        hidden = tf.nn.relu(conv)
-        pool = tf.nn.max_pool(hidden, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
-        shape = pool.get_shape().as_list()
-        reshape = tf.reshape(pool, [shape[0], shape[1] * shape[2] * shape[3]])
-        hidden = tf.nn.relu(tf.matmul(reshape, self.weights['w3']) + self.biases['b3'])
+        x = tf.nn.conv2d(x, self.weights['w1'], self.strides, padding='SAME') + self.biases['b1']
+        x = tf.nn.relu(x)
+        x = tf.nn.max_pool(x, self.kernels, self.kernels, padding='SAME')
+        x = tf.nn.conv2d(x, self.weights['w2'], self.strides, padding='SAME') + self.biases['b2']
+        x = tf.nn.relu(x)
+        x = tf.nn.max_pool(x, self.kernels, self.kernels, padding='SAME')
+        shape = x.get_shape().as_list()
+        x = tf.reshape(x, [shape[0], np.prod(shape[1:3])])
+        x = tf.nn.relu(tf.matmul(x, self.weights['w3']) + self.biases['b3'])
 
-        return tf.compat.v1.matmul(hidden, self.weights['w4']) + self.biases['b4']
+        return tf.compat.v1.matmul(x, self.weights['w4']) + self.biases['b4']
 
 
 class LeNet5(object):
 
-    def __init__(self, weights: Dict, biases: Dict):
+    def __init__(self, weights: Dict, biases: Dict, activation_func: Callable = tf.nn.sigmoid):
         super().__init__()
         self.weights = weights
         self.biases = biases
+        self.strides = [1, 1, 1, 1]
+        self.kernels = [1, 2, 2, 1]
+        self.activation_func = activation_func
+
+    def conv2d(self, x, weights, biases):
+        return tf.nn.conv2d(x, weights, strides=self.strides, padding='VALID') + biases
+
+    def avgpool2d(self, x):
+        return tf.nn.avg_pool(x, ksize=self.kernels, strides=self.kernels, padding='VALID')
 
     def __call__(self, x):
-        l_1 = tf.nn.conv2d(x, self.weights['w1'], [1, 1, 1, 1], padding='SAME') + self.biases['b1']
-        l_1 = tf.nn.relu(l_1)
-        pool = tf.nn.max_pool(l_1, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
-        l_2 = tf.nn.conv2d(pool, self.weights['w2'], [1, 1, 1, 1], padding='SAME') + self.biases['b2']
-        l_2 = tf.nn.relu(l_2)
-        pool = tf.nn.max_pool(l_2, [1, 2, 2, 1], [1, 2, 2, 1], padding='SAME')
-        l_3 = tf.compat.v1.layers.flatten(pool)
-        l_3 = tf.compat.v1.matmul(l_3, self.weights['w3']) + self.biases['b3']
-        l_3 = tf.nn.relu(l_3)
-        l_4 = tf.compat.v1.matmul(l_3, self.weights['w4']) + self.biases['b4']
-        l_4 = tf.nn.relu(l_4)
-        return tf.compat.v1.matmul(l_4, self.weights['w5']) + self.biases['b5']
+        x = self.conv2d(x, self.weights['w1'], self.biases['b1'])
+        x = self.avgpool2d(x)
+        x = self.activation_func(x)
+        x = self.conv2d(x, self.weights['w2'], self.biases['b2'])
+        x = self.avgpool2d(x)
+        x = self.activation_func(x)
+        x = tf.compat.v1.layers.flatten(x)
+        x = tf.compat.v1.matmul(x, self.weights['w3']) + self.biases['b3']
+        x = self.activation_func(x)
+
+        return tf.compat.v1.matmul(x, self.weights['w4']) + self.biases['b4']
 
 
 def load_data_splits(in_dir, new_shape: Union[Tuple, int] = 784, n_labels: int = 10):
@@ -119,14 +129,22 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
     lr_decay = get_param(params, 'lr_decay', 0.0)
     decay_steps = get_param(params, 'decay_steps', 1e3)
     l2_regularization = get_param(params, 'l2_regularization', False)
+    zscore = get_param(params, 'zscore', False)
 
     graph = tf.Graph()
     with graph.as_default():
 
+        if zscore:
+            train_mean = np.mean(train_dataset)
+            train_std = np.std(train_dataset)
+            train_dataset = (train_dataset - train_mean) / train_std
+            test_dataset = (test_dataset - train_mean) / train_std
+
         if est_class in [CNN2D, LeNet5]:
             height, width, num_channels = train_dataset.shape[1:]
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, height, width, num_channels))
-        else:
+
+        elif est_class in [LogisticRegression, MultilayerPerceptron]:
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_input))
 
         if est_class is LeNet5:
@@ -181,17 +199,15 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
                     depth ={'l1': 6, 'l2': 16, 'l3': 120, 'l4': 84}
                     weights = {
                         'w1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, 1, depth['l1']], stddev)),
-                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, 6, depth['l2']], stddev)),
-                        'w3': tf.Variable(tf.compat.v1.truncated_normal((height // 4 * width // 4 * depth['l2'], depth['l3']), stddev)),
-                        'w4': tf.Variable(tf.compat.v1.truncated_normal((depth['l3'], depth['l4']), stddev)),
-                        'w5': tf.Variable(tf.compat.v1.truncated_normal((depth['l4'], n_classes), stddev)),
+                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth['l1'], depth['l2']], stddev)),
+                        'w3': tf.Variable(tf.compat.v1.truncated_normal((400, depth['l3']), stddev)),
+                        'w4': tf.Variable(tf.compat.v1.truncated_normal((depth['l3'], n_classes), stddev)),
                     }
                     biases = {
                         'b1': tf.Variable(tf.zeros([depth['l1']])),
                         'b2': tf.Variable(tf.constant(1.0, shape=[depth['l2']])),
                         'b3': tf.Variable(tf.constant(1.0, shape=[depth['l3']])),
-                        'b4': tf.Variable(tf.constant(1.0, shape=[depth['l4']])),
-                        'b5': tf.Variable(tf.constant(1.0, shape=[n_classes]))
+                        'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
                     }
 
                     est = est_class(weights, biases)
@@ -221,7 +237,6 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         # get predictions
         train_prediction = tf.nn.softmax(logits)
         test_prediction = tf.nn.softmax(est(tf_test_dataset))
-    del est
 
     # train and test the model
     loss_logs = list()
@@ -244,3 +259,7 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         plt.xlabel('epoch')
         plt.ylabel('loss')
         plt.show()
+
+    del session
+    del est
+    del graph
