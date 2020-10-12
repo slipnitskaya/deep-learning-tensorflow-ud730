@@ -3,7 +3,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 
 from six.moves import cPickle as pickle
-from typing import Any, Dict, Tuple, Union, Callable
+from typing import Any, Dict, List, Tuple, Union, Callable
 
 
 class MultilayerPerceptron(object):
@@ -36,28 +36,34 @@ class LogisticRegression(object):
 
 class CNN2D(object):
 
-    def __init__(self, weights: Dict, biases: Dict):
+    def __init__(self, weights: Dict, biases: Dict, activation_func: Callable = tf.nn.relu):
         super().__init__()
         self.weights = weights
         self.biases = biases
         self.strides = [1, 1, 1, 1]
         self.kernels = [1, 2, 2, 1]
+        self.activation_func = activation_func
 
     def __call__(self, x):
         x = tf.nn.conv2d(x, self.weights['w1'], self.strides, padding='SAME') + self.biases['b1']
-        x = tf.nn.relu(x)
+        x = self.activation_func(x)
         x = tf.nn.max_pool(x, self.kernels, self.kernels, padding='SAME')
         x = tf.nn.conv2d(x, self.weights['w2'], self.strides, padding='SAME') + self.biases['b2']
-        x = tf.nn.relu(x)
+        x = self.activation_func(x)
         x = tf.nn.max_pool(x, self.kernels, self.kernels, padding='SAME')
         shape = x.get_shape().as_list()
-        x = tf.reshape(x, [shape[0], np.prod(shape[1:3])])
-        x = tf.nn.relu(tf.matmul(x, self.weights['w3']) + self.biases['b3'])
+        x = tf.reshape(x, [shape[0], np.prod(shape[1:4])])
+        x = tf.matmul(x, self.weights['w3']) + self.biases['b3']
+        x = self.activation_func(x)
 
         return tf.compat.v1.matmul(x, self.weights['w4']) + self.biases['b4']
 
 
 class LeNet5(object):
+
+    """
+    LeNet-5 model. Original architecture is more details: http://vision.stanford.edu/cs598_spring07/papers/Lecun98.pdf .
+    """
 
     def __init__(self, weights: Dict, biases: Dict, activation_func: Callable = tf.nn.sigmoid):
         super().__init__()
@@ -106,6 +112,10 @@ def reformat(X, y, new_shape: Union[Tuple, int] = 784, n_labels: int = 10, dtype
     return X, y
 
 
+def get_weigths(shape: Union[List, Tuple], mean: float = 0.0, stddev: float = 0.1):
+    return tf.Variable(tf.compat.v1.truncated_normal(shape, mean, stddev))
+
+
 def accuracy(y_pred, y_true):
     return 100.0 * np.sum(np.argmax(y_pred, 1) == np.argmax(y_true, 1)) / y_pred.shape[0]
 
@@ -121,18 +131,23 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
     n_input = train_dataset.shape[1]
     n_classes = train_labels.shape[-1]
 
+    zscore = get_param(params, 'zscore', False)
     num_steps = get_param(params, 'num_steps', 1001)
     batch_size = get_param(params, 'batch_size', 128)
 
     c = get_param(params, 'c', 1e-2)
     lr = get_param(params, 'lr', 1e-1)
     lr_decay = get_param(params, 'lr_decay', 0.0)
-    decay_steps = get_param(params, 'decay_steps', 1e3)
+    # decay_steps = get_param(params, 'decay_steps', 1e3)
     l2_regularization = get_param(params, 'l2_regularization', False)
-    zscore = get_param(params, 'zscore', False)
 
     graph = tf.Graph()
     with graph.as_default():
+
+        if est_class is LeNet5:
+            # reformat data to LeNet5-acceptable format
+            train_dataset = np.pad(train_dataset, ((0, 0), (2, 2), (2, 2), (0, 0)), 'constant')
+            test_dataset = np.pad(test_dataset, ((0, 0), (2, 2), (2, 2), (0, 0)), 'constant')
 
         if zscore:
             train_mean = np.mean(train_dataset)
@@ -143,11 +158,11 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         if est_class in [CNN2D, LeNet5]:
             height, width, num_channels = train_dataset.shape[1:]
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, height, width, num_channels))
-
-        elif est_class in [LogisticRegression, MultilayerPerceptron]:
+        else:
             tf_train_dataset = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_input))
 
         if est_class is LeNet5:
+            # encode classes w.r.t. LeNet5 conventions
             tf_train_labels = tf.one_hot(tf.compat.v1.placeholder(tf.int32, shape=None), n_classes)
         else:
             tf_train_labels = tf.compat.v1.placeholder(tf.float32, shape=(batch_size, n_classes))
@@ -158,33 +173,34 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         biases = {'out': tf.Variable(tf.zeros([n_classes]))}
 
         if est_class is LogisticRegression:
-            weights = {'lm': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_classes]))}
+            weights = {'lm': get_weigths([n_input, n_classes])}
+
             est = est_class(weights, biases)
 
         else:
             n_hidden = get_param(params, 'n_hidden', 1024)
-            random_seed = get_param(params, 'random_seed', 42)
-            dropout_rate = get_param(params, 'dropout_rate', 0.2)
 
             if est_class is MultilayerPerceptron:
-
+                random_seed = get_param(params, 'random_seed', 42)
+                dropout_rate = get_param(params, 'dropout_rate', 0.2)
                 weights = {
-                    'h1': tf.Variable(tf.compat.v1.truncated_normal([n_input, n_hidden])),
-                    'out': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes]))}
+                    'h1': get_weigths([n_input, n_hidden], stddev=1.0),
+                    'out': get_weigths([n_hidden, n_classes], stddev=1.0)
+                }
                 biases['b1'] = tf.Variable(tf.zeros([n_hidden]))
 
-            elif est_class in [CNN2D, LeNet5]:
+                est = est_class(weights, biases, random_seed, dropout_rate)
 
+            elif est_class in [CNN2D, LeNet5]:
                 patch_size = get_param(params, 'patch_size', 5)
-                stddev = 0.1
 
                 if est_class is CNN2D:
                     depth = get_param(params, 'depth', 16)
                     weights = {
-                        'w1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, num_channels, depth], stddev)),
-                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth, depth], stddev)),
-                        'w3': tf.Variable(tf.compat.v1.truncated_normal([height // 4 * width // 4 * depth, n_hidden], stddev)),
-                        'w4': tf.Variable(tf.compat.v1.truncated_normal([n_hidden, n_classes], stddev))
+                        'w1': get_weigths([patch_size, patch_size, num_channels, depth]),
+                        'w2': get_weigths([patch_size, patch_size, depth, depth]),
+                        'w3': get_weigths([height // 4 * width // 4 * depth, n_hidden]),
+                        'w4': get_weigths([n_hidden, n_classes])
                     }
                     biases = {
                         'b1': tf.Variable(tf.zeros([depth])),
@@ -192,16 +208,15 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
                         'b3': tf.Variable(tf.constant(1.0, shape=[n_hidden])),
                         'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
                     }
-
-                    est = est_class(weights, biases, dropout_rate, random_seed)
+                    activation_func = get_param(params, 'activation_func', tf.nn.relu)
 
                 elif est_class is LeNet5:
                     depth ={'l1': 6, 'l2': 16, 'l3': 120, 'l4': 84}
                     weights = {
-                        'w1': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, 1, depth['l1']], stddev)),
-                        'w2': tf.Variable(tf.compat.v1.truncated_normal([patch_size, patch_size, depth['l1'], depth['l2']], stddev)),
-                        'w3': tf.Variable(tf.compat.v1.truncated_normal((400, depth['l3']), stddev)),
-                        'w4': tf.Variable(tf.compat.v1.truncated_normal((depth['l3'], n_classes), stddev)),
+                        'w1': get_weigths([patch_size, patch_size, 1, depth['l1']]),
+                        'w2': get_weigths([patch_size, patch_size, depth['l1'], depth['l2']]),
+                        'w3': get_weigths((5 * 5 * depth['l2'], depth['l3'])),
+                        'w4': get_weigths((depth['l3'], n_classes))
                     }
                     biases = {
                         'b1': tf.Variable(tf.zeros([depth['l1']])),
@@ -209,8 +224,9 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
                         'b3': tf.Variable(tf.constant(1.0, shape=[depth['l3']])),
                         'b4': tf.Variable(tf.constant(1.0, shape=[n_classes]))
                     }
+                    activation_func = get_param(params, 'activation_func', tf.nn.sigmoid)
 
-                    est = est_class(weights, biases)
+                est = est_class(weights, biases, activation_func)
 
         logits = est(tf_train_dataset)
         model_name = est.__class__.__name__
@@ -230,7 +246,7 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         if lr_decay > 0.0:
             print('Scheduling learning rate decay...')
             global_step = tf.Variable(0)
-            lr = tf.compat.v1.train.exponential_decay(lr, global_step, decay_steps, lr_decay)
+            lr = tf.compat.v1.train.exponential_decay(lr, global_step, num_steps, lr_decay)
 
         optimizer = tf.compat.v1.train.GradientDescentOptimizer(lr).minimize(loss, global_step)
 
