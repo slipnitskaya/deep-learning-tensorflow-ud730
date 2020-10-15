@@ -1,3 +1,7 @@
+import math
+import random
+import zipfile
+import collections
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
@@ -91,6 +95,27 @@ class LeNet5(object):
         x = self.activation_func(x)
 
         return tf.compat.v1.matmul(x, self.weights['w4']) + self.biases['b4']
+
+
+class word2vec(object):
+
+    def __init__(self, vocabulary_size: int = 50000, embedding_size: int = 128, negative_samples: int = 64):
+        super().__init__()
+        self.vocabulary_size = vocabulary_size
+        self.embedding_size = embedding_size
+        self.num_sampled = negative_samples
+
+    def __call__(self, x):
+        embeddings = tf.Variable(
+            tf.compat.v1.random_uniform([self.vocabulary_size, self.embedding_size], -1.0, 1.0))
+
+        weights = get_weigths(shape=[self.vocabulary_size, self.embedding_size],
+                              stddev=1.0 / math.sqrt(self.embedding_size))
+        biases = tf.Variable(tf.zeros([self.vocabulary_size]))
+
+        embed = tf.nn.embedding_lookup(embeddings, x)
+
+        return embed, weights, biases, embeddings
 
 
 def load_data_splits(in_dir, new_shape: Union[Tuple, int] = 784, n_labels: int = 10):
@@ -255,9 +280,9 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
         test_prediction = tf.nn.softmax(est(tf_test_dataset))
 
     # train and test the model
-    loss_logs = list()
     with tf.compat.v1.Session(graph=graph) as session:
         tf.compat.v1.global_variables_initializer().run()
+        loss_logs = list()
         for epoch in range(num_steps):
             offset = (epoch * batch_size) % (train_labels.shape[0] - batch_size)
             batch_data = train_dataset[offset:(offset + batch_size), :]
@@ -279,3 +304,77 @@ def model_training(train_dataset, test_dataset, train_labels, test_labels, est_c
     del session
     del est
     del graph
+
+
+def read_zip(filename):
+    """
+    Extract the first file enclosed in a zip file as a list of words.
+    """
+    with zipfile.ZipFile(filename) as f:
+        data = tf.compat.as_str(f.read(f.namelist()[0])).split()
+    return data
+
+
+def build_dataset(words, vocabulary_size: int):
+    """
+    Build the dictionary and replace rare words with UNK token.
+    """
+    count = [['UNK', -1]]
+    count.extend(collections.Counter(words).most_common(vocabulary_size - 1))
+    dictionary = dict()
+    for word, _ in count:
+        dictionary[word] = len(dictionary)
+    data = list()
+    unk_count = 0
+    for word in words:
+        if word in dictionary:
+            index = dictionary[word]
+        else:
+            index = 0
+            unk_count = unk_count + 1
+        data.append(index)
+    count[0][1] = unk_count
+    reverse_dictionary = dict(zip(dictionary.values(), dictionary.keys()))
+
+    return data, count, dictionary, reverse_dictionary
+
+
+def get_batch(data, batch_size, num_skips, skip_window):
+    """
+    Function to generate a training batch for the skip-gram model.
+    """
+    data_index = 0
+    assert batch_size % num_skips == 0
+    assert num_skips <= 2 * skip_window
+    batch = np.ndarray(shape=(batch_size), dtype=np.int32)
+    labels = np.ndarray(shape=(batch_size, 1), dtype=np.int32)
+    span = 2 * skip_window + 1
+    buffer = collections.deque(maxlen=span)
+    for _ in range(span):
+        buffer.append(data[data_index])
+        data_index = (data_index + 1) % len(data)
+    for i in range(batch_size // num_skips):
+        target = skip_window
+        targets_to_avoid = [skip_window]
+        for j in range(num_skips):
+            while target in targets_to_avoid:
+                target = random.randint(0, span - 1)
+            targets_to_avoid.append(target)
+            batch[i * num_skips + j] = buffer[skip_window]
+            labels[i * num_skips + j, 0] = buffer[target]
+        buffer.append(data[data_index])
+        data_index = (data_index + 1) % len(data)
+
+    return batch, labels
+
+
+def plot_2d_projection(embeddings, labels):
+    assert embeddings.shape[0] >= len(labels), 'More labels than embeddings'
+    plt.figure(figsize=(15, 15))
+    for i, label in enumerate(labels):
+        x, y = embeddings[i, :]
+        plt.scatter(x, y)
+        plt.annotate(label, xy=(x, y), xytext=(5, 2), textcoords='offset points', ha='right', va='bottom')
+        plt.xlabel('tSNE_1', fontsize=16)
+        plt.ylabel('tSNE_2', fontsize=16)
+    plt.show()
